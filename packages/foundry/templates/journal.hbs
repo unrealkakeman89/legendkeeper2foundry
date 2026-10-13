@@ -1,0 +1,14 @@
+<section class="legendkeeper journal">
+  <header>
+    <h2>{{name}}</h2>
+    <p class="lk-sync" data-state="{{syncState}}">{{syncLabel}}</p>
+  </header>
+  {{#if hiddenDocuments}}
+    <nav class="lk-virtual-tabs" data-gm-only="true">
+      {{#each hiddenDocuments}}
+        <span class="lk-virtual-tab" data-document-id="{{id}}">{{name}}</span>
+      {{/each}}
+    </nav>
+  {{/if}}
+  <div class="lk-pages">{{{rendered}}}</div>
+</section>

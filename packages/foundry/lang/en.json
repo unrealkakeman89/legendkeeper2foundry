@@ -1,0 +1,12 @@
+{
+  "TYPES.JournalEntryPage.legendkeeper.page": "LegendKeeper Page",
+  "LEGENDKEEPER.ServiceUrl": "Companion service URL",
+  "LEGENDKEEPER.ServiceUrlHint": "127.0.0.1 works only when this browser is on the Foundry host. A remote browser needs the authenticated HTTPS address of the companion service.",
+  "LEGENDKEEPER.Create": "Create LegendKeeper Journal",
+  "LEGENDKEEPER.Import": "Import from LegendKeeper",
+  "LEGENDKEEPER.SyncPending": "Pending",
+  "LEGENDKEEPER.SyncSynced": "Synced",
+  "LEGENDKEEPER.SyncFailed": "Failed",
+  "LEGENDKEEPER.Open": "Open in LegendKeeper",
+  "LEGENDKEEPER.Migrate": "Assign block ids and refresh the baseline"
+}

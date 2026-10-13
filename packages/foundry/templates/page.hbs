@@ -1,0 +1,14 @@
+<section class="legendkeeper sheet">
+  <p class="lk-sync" data-state="{{syncState}}">{{syncLabel}}</p>
+  {{#if syncError}}<p class="lk-sync-error">{{syncError}}</p>{{/if}}
+  {{#if migrationRequired}}
+    <p class="lk-migration">This page has blocks without stable ids. Editing stays disabled until you authorize a one-time id migration.</p>
+    <button type="button" data-action="migrateIds">Assign block ids</button>
+  {{/if}}
+  <div class="lk-body">{{{rendered}}}</div>
+  {{#if editable}}
+    <label>Paragraph
+      <textarea name="paragraphText" data-block-id="{{editBlockId}}">{{paragraphText}}</textarea>
+    </label>
+  {{/if}}
+</section>

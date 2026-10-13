@@ -1,0 +1,37 @@
+{
+  "id": "legendkeeper",
+  "title": "LegendKeeper",
+  "description": "LegendKeeper journals for Foundry VTT, synchronized through a companion service. The module does not hold the LegendKeeper API key.",
+  "version": "0.1.0",
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "authors": [
+    {
+      "name": "legendkeeper2foundry"
+    }
+  ],
+  "esmodules": [
+    "module/main.mjs"
+  ],
+  "styles": [
+    "styles/legendkeeper.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    }
+  ],
+  "documentTypes": {
+    "JournalEntryPage": {
+      "page": {}
+    }
+  },
+  "socket": false,
+  "url": "https://www.legendkeeper.com/developers",
+  "manifest": "https://www.legendkeeper.com/developers",
+  "download": ""
+}
