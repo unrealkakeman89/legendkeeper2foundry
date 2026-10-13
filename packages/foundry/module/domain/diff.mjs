@@ -4,20 +4,42 @@ function sameOwn(left, right) {
   return stableString(ownFields(left)) === stableString(ownFields(right));
 }
 
+function protectedKind(block) {
+  if (!block || typeof block !== "object") return null;
+  if (block.kind === "unsupported") return "unsupported";
+  if (block.kind === "secret") return "secret";
+  for (const child of [...(block.children ?? []), ...(block.rows ?? [])]) {
+    const kind = protectedKind(child);
+    if (kind) return kind;
+  }
+  return null;
+}
+
+function refuseProtected(kind) {
+  if (kind === "secret") {
+    const error = new Error("Refusing to save because a secret block would be dropped");
+    error.code = "PROTECTED_LOSS";
+    throw error;
+  }
+  const error = new Error("Refusing to save because an unsupported block would be dropped");
+  error.code = "UNSUPPORTED_LOSS";
+  throw error;
+}
+
 function diffList(before, after, ops) {
   const beforeById = new Map((before ?? []).filter((block) => block?.id).map((block) => [block.id, block]));
   const afterIds = new Set((after ?? []).filter((block) => block?.id).map((block) => block.id));
 
   for (const block of before ?? []) {
-    if (block?.kind === "unsupported") {
-      if (!block.id || !afterIds.has(block.id)) {
-        const error = new Error("Refusing to save because an unsupported block would be dropped");
-        error.code = "UNSUPPORTED_LOSS";
-        throw error;
-      }
-      continue;
+    if (block?.kind === "unsupported" || block?.kind === "secret") {
+      if (!block.id || !afterIds.has(block.id)) refuseProtected(block.kind);
+      if (block.kind === "unsupported") continue;
     }
-    if (block?.id && !afterIds.has(block.id)) ops.push({ op: "delete", blockId: block.id });
+    if (block?.id && !afterIds.has(block.id)) {
+      const kind = protectedKind(block);
+      if (kind) refuseProtected(kind);
+      ops.push({ op: "delete", blockId: block.id });
+    }
   }
 
   let previousId = null;

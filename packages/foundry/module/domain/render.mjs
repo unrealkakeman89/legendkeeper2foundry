@@ -1,3 +1,5 @@
+import { safeImageUrl, safeLink } from "./urls.mjs";
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;",
@@ -32,7 +34,8 @@ function renderRuns(content) {
     if (run?.strike) text = `<s>${text}</s>`;
     if (run?.sub) text = `<sub>${text}</sub>`;
     if (run?.sup) text = `<sup>${text}</sup>`;
-    if (run?.link) text = `<a href="${escapeHtml(run.link)}" rel="noreferrer">${text}</a>`;
+    const href = safeLink(run?.link);
+    if (href) text = `<a href="${escapeHtml(href)}" rel="noreferrer">${text}</a>`;
     return text;
   }).join("");
 }
@@ -94,7 +97,9 @@ function renderOne(block, mode) {
     case "image": {
       const title = block.isTitleHidden ? "" : `<figcaption>${escapeHtml(block.title || "Image")}</figcaption>`;
       const fill = block.fill ? " lk-image-fill" : "";
-      return `<figure class="lk-image${fill}"${id}${layout}><img src="${escapeHtml(block.url)}" alt="${escapeHtml(block.alt ?? "")}">${title}</figure>`;
+      const src = safeImageUrl(block.url);
+      const image = src ? `<img src="${escapeHtml(src)}" alt="${escapeHtml(block.alt ?? "")}">` : `<p class="lk-image-omitted">Image omitted because its URL is not https.</p>`;
+      return `<figure class="lk-image${fill}"${id}${layout}>${image}${title}</figure>`;
     }
     case "keyValue": {
       const rows = (block.rows ?? []).map((row) => `<div class="lk-kv-row"><dt>${escapeHtml(row.key)}</dt><dd>${escapeHtml(row.text ?? "")}</dd></div>`).join("");
@@ -132,8 +137,9 @@ export function renderBlocks(blocks, mode = "player") {
 }
 
 export function renderPage(presentation, blocks, mode = "player") {
-  const banner = presentation?.banner?.url
-    ? `<header class="lk-banner" style="background-image:url('${escapeHtml(presentation.banner.url)}');background-position:center ${Number(presentation.banner.yPosition ?? 50)}%"></header>`
+  const bannerUrl = safeImageUrl(presentation?.banner?.url);
+  const banner = bannerUrl
+    ? `<header class="lk-banner" style="background-image:url('${escapeHtml(bannerUrl)}');background-position:center ${Number(presentation.banner.yPosition ?? 50)}%"></header>`
     : "";
   const properties = (presentation?.properties ?? []).map((property) => renderOne(property, mode)).join("");
   const sidebar = properties ? `<aside class="lk-sidebar">${properties}</aside>` : "";

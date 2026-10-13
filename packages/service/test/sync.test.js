@@ -28,22 +28,25 @@ test("legacy pages require an authorized id migration before editing", async () 
   await engine.importBranch();
   assert.equal(lk.calls.assignBlockIds, 0);
   const stored = store.getDocument("r-legacy0000000000000000", "doc1");
-  const refused = await engine.editDocument("r-legacy0000000000000000", "doc1", {
+  const refused = await engine.editParagraph("r-legacy0000000000000000", "doc1", {
     baseVersion: stored.version,
-    blocks: stored.baseline.blocks
+    blockId: "missing",
+    content: [{ text: "No id yet" }]
   });
   assert.equal(refused.state, "failed");
   assert.equal(refused.code, "NEEDS_ID_MIGRATION");
-  assert.equal(refused.retained[0].content[0].text, "No id yet");
+  assert.equal(refused.retained[0].text, "No id yet");
   await assert.rejects(() => engine.migrateIds("r-legacy0000000000000000", "doc1", { confirm: false }), /authorization/);
   const migrated = await engine.migrateIds("r-legacy0000000000000000", "doc1", { confirm: true });
   assert.equal(migrated.assigned, 1);
   assert.notEqual(migrated.version, stored.version);
   assert.ok(migrated.blocks[0].id);
   assert.equal(migrated.blocks[1].id, "keep");
-  const edited = structuredClone(migrated.blocks);
-  edited[0] = { ...edited[0], content: [{ text: "Now addressable" }] };
-  const saved = await engine.editDocument("r-legacy0000000000000000", "doc1", { baseVersion: migrated.version, blocks: edited });
+  const saved = await engine.editParagraph("r-legacy0000000000000000", "doc1", {
+    baseVersion: migrated.version,
+    blockId: migrated.blocks[0].id,
+    content: [{ text: "Now addressable" }]
+  });
   assert.equal(saved.state, "synced");
   assert.equal(saved.operations[0].blockId, migrated.blocks[0].id);
   store.close();
@@ -73,14 +76,20 @@ test("overlapping edits become a conflict and the Foundry change is retained", a
     { id: "p1", kind: "paragraph", content: [{ text: "The temple was abandoned approximately 4,000 years ago." }] },
     { id: "p2", kind: "paragraph", content: [{ text: "The road remains." }] }
   ]);
-  const foundryBlocks = structuredClone(baseline.baseline.blocks);
-  foundryBlocks[0] = { ...foundryBlocks[0], content: [{ text: "The temple was destroyed during an ancient conflict." }] };
-  const result = await engine.editDocument("r-conflict00000000000000", "doc1", { baseVersion: baseline.version, blocks: foundryBlocks });
+  const result = await engine.editParagraph("r-conflict00000000000000", "doc1", {
+    baseVersion: baseline.version,
+    blockId: "p1",
+    content: [{ text: "The temple was destroyed during an ancient conflict." }]
+  });
   assert.equal(result.state, "failed");
   assert.equal(result.code, "VERSION_MISMATCH");
-  assert.equal(result.retained[0].content[0].text, "The temple was destroyed during an ancient conflict.");
+  assert.equal(result.retained[0].text, "The temple was destroyed during an ancient conflict.");
   const remote = await lk.getBlocks("r-conflict00000000000000", "doc1");
   assert.equal(remote.blocks[0].content[0].text, "The temple was abandoned approximately 4,000 years ago.");
+  const held = store.getDocument("r-conflict00000000000000", "doc1");
+  assert.equal(held.baseline.blocks[0].content[0].text, "The temple was abandoned.");
+  assert.equal(held.draft.content[0].text.includes("destroyed"), true);
+  assert.equal(held.remote.blocks[0].content[0].text.includes("4,000"), true);
   const [conflict] = store.listConflicts();
   assert.equal(conflict.legendkeeper.content[0].text.includes("4,000"), true);
   assert.equal(conflict.foundry.content[0].text.includes("destroyed"), true);
@@ -89,6 +98,47 @@ test("overlapping edits become a conflict and the Foundry change is retained", a
   assert.equal(kept.state, "synced");
   const settled = await lk.getBlocks("r-conflict00000000000000", "doc1");
   assert.equal(settled.blocks[0].content[0].text, "The temple was abandoned approximately 4,000 years ago.");
+  store.close();
+});
+
+test("a version change on a different block merges and does not open a conflict", async () => {
+  const lk = createMemoryLegendKeeper();
+  lk.seed({
+    id: "r-merge00000000000000000",
+    name: "Merge",
+    updatedAt: "2026-10-13T00:00:00.000Z",
+    documents: [{
+      id: "doc1",
+      name: "Overview",
+      type: "page",
+      rank: "a0",
+      blocks: [
+        { id: "p1", kind: "paragraph", content: [{ text: "The temple was abandoned." }] },
+        { id: "p2", kind: "paragraph", content: [{ text: "The road remains." }] }
+      ]
+    }]
+  });
+  const { engine, store } = world(lk);
+  await engine.importBranch();
+  const baseline = store.getDocument("r-merge00000000000000000", "doc1");
+  lk.debugSetBlocks("r-merge00000000000000000", "doc1", [
+    { id: "p1", kind: "paragraph", content: [{ text: "The temple was abandoned." }] },
+    { id: "p2", kind: "paragraph", content: [{ text: "The road was repaired." }] }
+  ]);
+  const result = await engine.editParagraph("r-merge00000000000000000", "doc1", {
+    baseVersion: baseline.version,
+    blockId: "p1",
+    content: [{ text: "The temple was destroyed." }]
+  });
+  assert.equal(result.state, "synced");
+  assert.equal(result.merged, true);
+  assert.equal(store.listConflicts().length, 0);
+  const after = await lk.getBlocks("r-merge00000000000000000", "doc1");
+  assert.equal(after.blocks[0].content[0].text, "The temple was destroyed.");
+  assert.equal(after.blocks[1].content[0].text, "The road was repaired.");
+  const accepted = store.getDocument("r-merge00000000000000000", "doc1");
+  assert.equal(accepted.draft, null);
+  assert.equal(accepted.baseline.blocks[0].content[0].text, "The temple was destroyed.");
   store.close();
 });
 
@@ -200,12 +250,14 @@ test("dropping an unsupported block fails and keeps the user's draft", async () 
   const { engine, store } = world(lk);
   await engine.importBranch();
   const stored = store.getDocument("r-uns0000000000000000000", "doc1");
+  const { diffBlocks } = await import("../../foundry/module/domain/diff.mjs");
+  assert.throws(() => diffBlocks(stored.baseline.blocks, [stored.baseline.blocks[0]]), /unsupported block/);
   const result = await engine.editDocument("r-uns0000000000000000000", "doc1", {
     baseVersion: stored.version,
     blocks: [stored.baseline.blocks[0]]
   });
   assert.equal(result.state, "failed");
-  assert.equal(result.code, "UNSUPPORTED_LOSS");
+  assert.equal(result.code, "FULL_TREE_REFUSED");
   const remote = await lk.getBlocks("r-uns0000000000000000000", "doc1");
   assert.equal(remote.blocks[1].kind, "unsupported");
   store.close();
@@ -214,14 +266,14 @@ test("dropping an unsupported block fails and keeps the user's draft", async () 
 test("backup and schema migrations survive a reopen", async () => {
   const directory = mkdtempSync(join(tmpdir(), "lk-backup-"));
   const store = openStore(join(directory, "sync.sqlite"));
-  assert.deepEqual(store.migrationVersions(), [1, 2]);
+  assert.deepEqual(store.migrationVersions(), [1, 2, 3]);
   store.putResource({ id: "r-backup000000000000000", name: "Backup", updatedAt: "2026-10-13T00:00:00.000Z" });
   const backup = join(directory, "backup.sqlite");
   store.backup(backup);
   store.putResource({ id: "r-backup000000000000000", name: "Changed", updatedAt: "2026-10-13T00:00:00.000Z" });
   const restored = openStore(backup);
   assert.equal(restored.getResource("r-backup000000000000000").name, "Backup");
-  assert.deepEqual(restored.migrationVersions(), [1, 2]);
+  assert.deepEqual(restored.migrationVersions(), [1, 2, 3]);
   restored.close();
   store.close();
 });

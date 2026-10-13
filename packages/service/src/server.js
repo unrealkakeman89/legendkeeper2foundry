@@ -132,7 +132,20 @@ export function createApp({ lk, store, pairingCode, allowedOrigins = [] }) {
       }
       const edit = url.pathname.match(/^\/v1\/documents\/([^/]+)\/([^/]+)\/edits$/);
       if (request.method === "POST" && edit) {
-        send(response, 200, await engine.editDocument(edit[1], edit[2], { baseVersion: body.baseVersion, blocks: body.blocks, actor: session.clientId }), headers);
+        if (body.blocks !== undefined) {
+          send(response, 200, await engine.editDocument(), headers);
+          return;
+        }
+        send(response, 200, await engine.editParagraph(edit[1], edit[2], {
+          baseVersion: body.baseVersion,
+          blockId: body.blockId,
+          content: body.content,
+          actor: session.clientId
+        }), headers);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/mappings") {
+        send(response, 200, engine.registerFoundryMapping(body.resourceId, { foundryUuid: body.foundryUuid, pages: body.pages }), headers);
         return;
       }
       const migrate = url.pathname.match(/^\/v1\/documents\/([^/]+)\/([^/]+)\/migrate-ids$/);
@@ -141,25 +154,43 @@ export function createApp({ lk, store, pairingCode, allowedOrigins = [] }) {
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/sync/leader") {
-        send(response, 200, engine.acquireLeader(body.clientId || session.clientId, body.ttlMs), headers);
+        send(response, 200, engine.acquireLeader(session.clientId, body.ttlMs), headers);
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/sync/poll") {
-        send(response, 200, await engine.poll({ full: Boolean(body.full), leaderClientId: body.clientId || session.clientId }), headers);
+        send(response, 200, await engine.poll({ full: Boolean(body.full), leaderClientId: session.clientId }), headers);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/conflicts") {
+        send(response, 200, { conflicts: engine.listConflicts() }, headers);
         return;
       }
       const conflict = url.pathname.match(/^\/v1\/conflicts\/(\d+)\/resolve$/);
       if (request.method === "POST" && conflict) {
-        send(response, 200, await engine.resolveConflict(Number(conflict[1]), { choice: body.choice, blocks: body.blocks, leaderClientId: body.clientId || session.clientId }), headers);
+        send(response, 200, await engine.resolveConflict(Number(conflict[1]), {
+          choice: body.choice,
+          content: body.content,
+          leaderClientId: session.clientId,
+          actor: session.clientId
+        }), headers);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/deletions") {
+        send(response, 200, { deletions: engine.listDeletions() }, headers);
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/deletions") {
-        send(response, 202, engine.requestDeletion({ ...body, source: body.source ?? session.clientId }), headers);
+        send(response, 202, engine.requestDeletion({
+          targetType: body.targetType,
+          resourceId: body.resourceId,
+          documentId: body.documentId,
+          source: session.clientId
+        }), headers);
         return;
       }
       const review = url.pathname.match(/^\/v1\/deletions\/(\d+)\/review$/);
       if (request.method === "POST" && review) {
-        send(response, 200, await engine.reviewDeletion(Number(review[1]), body.decision, { leaderClientId: body.clientId || session.clientId }), headers);
+        send(response, 200, await engine.reviewDeletion(Number(review[1]), body.decision, { leaderClientId: session.clientId }), headers);
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/operations") {

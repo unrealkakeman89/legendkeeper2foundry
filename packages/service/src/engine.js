@@ -1,7 +1,9 @@
+import { missingBlockIds, findBlock } from "../../foundry/module/domain/blocks.mjs";
 import { diffBlocks } from "../../foundry/module/domain/diff.mjs";
-import { findBlock } from "../../foundry/module/domain/blocks.mjs";
-import { projectDocument } from "../../foundry/module/domain/redact.mjs";
 import { buildFoundryJournal } from "../../foundry/module/domain/journal.mjs";
+import { projectDocument } from "../../foundry/module/domain/redact.mjs";
+import { sameBlockConflict } from "../../foundry/module/domain/reconcile.mjs";
+import { applyTextEdits, isRunArray, runEditProblem } from "../../foundry/module/domain/runs.mjs";
 import { newOperationKey, newResourceId } from "./ids.js";
 
 function syncError(code, message) {
@@ -66,24 +68,52 @@ export function createEngine({ lk, store }) {
     return ids;
   }
 
-  async function applyOperation(resourceId, documentId, operation, version) {
-    if (operation.op === "update") {
-      const written = await lk.updateBlock(resourceId, documentId, operation.blockId, { ...operation.fields, ifMatch: version });
-      return written.version;
+  function knownVersion(stored, baseVersion) {
+    return [stored?.version, stored?.baseline?.version, stored?.remote?.version].includes(baseVersion);
+  }
+
+  async function confirmParagraph(resourceId, documentId, blockId, content, version, opId, actor) {
+    await lk.updateBlock(resourceId, documentId, blockId, { content, ifMatch: version });
+    const fresh = await lk.getBlocks(resourceId, documentId);
+    const stored = store.getDocument(resourceId, documentId);
+    store.putDocument(resourceId, { ...stored, version: fresh.version }, fresh);
+    store.completeOperation(opId, { version: fresh.version });
+    store.audit(actor, "edit", { resourceId, documentId, blockIds: [blockId] });
+    return fresh;
+  }
+
+  async function reconcileParagraph(resourceId, documentId, blockId, content, actor, opId) {
+    const stored = store.getDocument(resourceId, documentId);
+    const remote = await lk.getBlocks(resourceId, documentId);
+    store.setRemote(resourceId, documentId, remote);
+    if (!sameBlockConflict(stored.baseline.blocks, remote.blocks, blockId)) {
+      try {
+        const fresh = await confirmParagraph(resourceId, documentId, blockId, content, remote.version, opId, actor);
+        return { state: "synced", version: fresh.version, operations: [{ op: "update", blockId }], merged: true };
+      } catch (error) {
+        if (!isVersionMismatch(error)) {
+          store.failOperation(opId, error);
+          return { state: "failed", error: error.message, code: error.code ?? "ERROR", retained: content, operations: [] };
+        }
+      }
     }
-    if (operation.op === "insert") {
-      const written = await lk.insertBlock(resourceId, documentId, { block: operation.block, after: operation.after, ifMatch: version });
-      return written.version;
-    }
-    if (operation.op === "move") {
-      const written = await lk.moveBlock(resourceId, documentId, operation.blockId, { after: operation.after, ifMatch: version });
-      return written.version;
-    }
-    if (operation.op === "delete") {
-      const written = await lk.deleteBlock(resourceId, documentId, operation.blockId, { ifMatch: version });
-      return written.version;
-    }
-    throw syncError("UNKNOWN_OP", `Unknown block operation ${operation.op}`);
+    const conflictId = store.addConflict({
+      resourceId,
+      documentId,
+      blockId,
+      legendkeeper: findBlock(remote.blocks, blockId),
+      foundry: { id: blockId, kind: "paragraph", content }
+    });
+    store.failOperation(opId, syncError("VERSION_MISMATCH", "LegendKeeper changed this block before the save was accepted"));
+    store.audit(actor, "conflict", { conflictId, resourceId, documentId, blockId });
+    return {
+      state: "failed",
+      error: "LegendKeeper changed this block before the save was accepted",
+      code: "VERSION_MISMATCH",
+      conflictId,
+      retained: content,
+      operations: []
+    };
   }
 
   return {
@@ -148,62 +178,82 @@ export function createEngine({ lk, store }) {
     },
 
     async editorTree(resourceId, documentId) {
-      const blocks = await lk.getBlocks(resourceId, documentId);
+      const remote = await lk.getBlocks(resourceId, documentId);
       const stored = store.getDocument(resourceId, documentId);
+      if (stored) store.setRemote(resourceId, documentId, remote);
+      const baseline = stored?.baseline ?? null;
       return {
-        version: blocks.version,
-        blocks: blocks.blocks,
+        version: stored?.version ?? remote.version,
+        blocks: baseline?.blocks ?? remote.blocks,
+        baseline,
+        draft: stored?.draft ?? null,
+        remote,
+        remoteVersion: remote.version,
         isHidden: Boolean(stored?.isHidden),
-        missingIds: diffSafe(blocks.blocks)
+        missingIds: diffSafe(baseline?.blocks ?? remote.blocks)
       };
     },
 
-    async editDocument(resourceId, documentId, { baseVersion, blocks, actor = "gm" }) {
+    async editDocument() {
+      return {
+        state: "failed",
+        code: "FULL_TREE_REFUSED",
+        error: "Saves must update one paragraph's content. A full block tree is not accepted.",
+        retained: null,
+        operations: []
+      };
+    },
+
+    async editParagraph(resourceId, documentId, { baseVersion, blockId, content, actor = "gm" }) {
       const stored = store.getDocument(resourceId, documentId);
       if (!stored?.baseline) throw syncError("NO_BASELINE", "Import the page before editing it");
-      let operations;
-      try {
-        operations = diffBlocks(stored.baseline.blocks, blocks);
-      } catch (error) {
-        const opId = store.beginOperation({
-          opKey: newOperationKey("edit"),
-          kind: "edit",
-          payload: { resourceId, documentId, baseVersion, blocks }
-        });
-        store.failOperation(opId, error);
-        return { state: "failed", error: error.message, code: error.code, retained: blocks, operations: [] };
+      const baselineBlock = findBlock(stored.baseline.blocks, blockId);
+      if (!isRunArray(content)) {
+        return { state: "failed", code: "INVALID_CONTENT", error: "Paragraph content must be an array of runs", retained: content ?? null, operations: [] };
       }
+      if (!baselineBlock) {
+        const missing = missingBlockIds(stored.baseline.blocks);
+        if (missing.length > 0) {
+          return { state: "failed", code: "NEEDS_ID_MIGRATION", error: "This page needs a one-time block id migration before it can be edited", retained: content, operations: [] };
+        }
+        return { state: "failed", code: "NOT_A_PARAGRAPH", error: "Only an existing paragraph can be edited in this pass", retained: content, operations: [] };
+      }
+      if (baselineBlock.kind !== "paragraph") {
+        return { state: "failed", code: "NOT_A_PARAGRAPH", error: "Only an existing paragraph can be edited in this pass", retained: content, operations: [] };
+      }
+      const problem = runEditProblem(baselineBlock.content ?? [], content);
+      const draft = { blockId, baseVersion, content };
+      store.setDraft(resourceId, documentId, draft);
+      if (problem) {
+        const message = problem === "FORMAT_LOSS"
+          ? "Refusing to collapse a formatted paragraph into plain text"
+          : problem === "RUN_STRUCTURE"
+            ? "Refusing to add, remove, or retarget runs"
+            : "Paragraph content must be an array of runs";
+        return { state: "failed", code: problem, error: message, retained: content, operations: [] };
+      }
+      const written = applyTextEdits(baselineBlock.content ?? [], content);
       const opId = store.beginOperation({
         opKey: newOperationKey("edit"),
         kind: "edit",
-        payload: { resourceId, documentId, baseVersion, operations, blocks }
+        payload: { resourceId, documentId, baseVersion, blockId, content: written }
       });
       try {
-        let version = baseVersion;
-        for (const operation of operations) version = await applyOperation(resourceId, documentId, operation, version);
-        const fresh = await lk.getBlocks(resourceId, documentId);
-        store.putDocument(resourceId, { ...stored, version: fresh.version }, fresh);
-        store.completeOperation(opId, { version: fresh.version });
-        store.audit(actor, "edit", { resourceId, documentId, blockIds: operations.map((item) => item.blockId).filter(Boolean) });
-        return { state: "synced", version: fresh.version, operations };
-      } catch (error) {
-        if (isVersionMismatch(error)) {
-          const fresh = await lk.getBlocks(resourceId, documentId);
-          const blockId = operations.find((item) => item.op === "update")?.blockId ?? operations[0]?.blockId ?? "document";
-          const conflictId = store.addConflict({
-            resourceId,
-            documentId,
-            blockId,
-            legendkeeper: findBlock(fresh.blocks, blockId) ?? fresh.blocks,
-            foundry: findBlock(blocks, blockId) ?? blocks
-          });
-          store.failOperation(opId, error);
-          store.audit(actor, "conflict", { conflictId, resourceId, documentId, blockId });
-          return { state: "failed", error: "LegendKeeper changed this block before the save was accepted", code: "VERSION_MISMATCH", conflictId, retained: blocks };
+        if (!knownVersion(stored, baseVersion)) {
+          return await reconcileParagraph(resourceId, documentId, blockId, written, actor, opId);
         }
-        if (error.code !== "CRASH_AFTER_WRITE") store.failOperation(opId, error);
+        const fresh = await confirmParagraph(resourceId, documentId, blockId, written, baseVersion, opId, actor);
+        return { state: "synced", version: fresh.version, operations: [{ op: "update", blockId }] };
+      } catch (error) {
         if (error.code === "CRASH_AFTER_WRITE") throw error;
-        return { state: "failed", error: error.message, code: error.code, retained: blocks };
+        if (isVersionMismatch(error)) return reconcileParagraph(resourceId, documentId, blockId, written, actor, opId);
+        try {
+          store.setRemote(resourceId, documentId, await lk.getBlocks(resourceId, documentId));
+        } catch {
+          // The baseline and the draft stay as they were.
+        }
+        store.failOperation(opId, error);
+        return { state: "failed", error: error.message, code: error.code ?? "ERROR", retained: written, operations: [] };
       }
     },
 
@@ -240,9 +290,12 @@ export function createEngine({ lk, store }) {
           if (document.type !== "page" && document.type !== "blank") continue;
           const blocks = await lk.getBlocks(resource.id, document.id);
           const stored = store.getDocument(resource.id, document.id);
-          if (stored?.baseline && stored.version === blocks.version) continue;
+          if (stored?.baseline && stored.version === blocks.version && !stored.draft) continue;
           const open = store.listConflicts().some((conflict) => conflict.state === "open" && conflict.documentId === document.id);
-          if (open) continue;
+          if (open || stored?.draft) {
+            store.setRemote(resource.id, document.id, blocks);
+            continue;
+          }
           store.putDocument(resource.id, { ...document, resourceId: resource.id }, blocks);
           const system = projectDocument({ ...document, resourceId: resource.id }, blocks);
           if (system) updates.push({ resourceId: resource.id, documentId: document.id, system });
@@ -252,11 +305,12 @@ export function createEngine({ lk, store }) {
       return { updates };
     },
 
-    async resolveConflict(id, { choice, blocks, leaderClientId, actor = "gm" }) {
+    async resolveConflict(id, { choice, content, leaderClientId, actor = "gm" }) {
       assertLeader(leaderClientId);
       const conflict = store.listConflicts().find((item) => item.id === id);
       if (!conflict || conflict.state !== "open") throw syncError("NO_CONFLICT", "That conflict is not open");
       const fresh = await lk.getBlocks(conflict.resourceId, conflict.documentId);
+      store.setRemote(conflict.resourceId, conflict.documentId, fresh);
       if (choice === "legendkeeper") {
         const stored = store.getDocument(conflict.resourceId, conflict.documentId);
         store.putDocument(conflict.resourceId, { ...stored, version: fresh.version }, fresh);
@@ -264,11 +318,14 @@ export function createEngine({ lk, store }) {
         store.audit(actor, "resolve-conflict", { id, choice });
         return { state: "synced", version: fresh.version, system: projectDocument(stored, fresh) };
       }
-      const nextBlocks = choice === "foundry" ? replaceBlock(fresh.blocks, conflict.blockId, conflict.foundry) : blocks;
-      if (!nextBlocks) throw syncError("MERGE_REQUIRED", "Manual merge requires the merged block tree");
-      const stored = store.getDocument(conflict.resourceId, conflict.documentId);
-      store.putDocument(conflict.resourceId, stored, { ...fresh, blocks: fresh.blocks });
-      const result = await this.editDocument(conflict.resourceId, conflict.documentId, { baseVersion: fresh.version, blocks: nextBlocks, actor });
+      const nextContent = choice === "foundry" ? conflict.foundry?.content : content;
+      if (!Array.isArray(nextContent)) throw syncError("MERGE_REQUIRED", "Manual merge requires the merged paragraph runs");
+      const result = await this.editParagraph(conflict.resourceId, conflict.documentId, {
+        baseVersion: fresh.version,
+        blockId: conflict.blockId,
+        content: nextContent,
+        actor
+      });
       if (result.state === "synced") store.setConflictState(id, choice === "foundry" ? "kept-foundry" : "merged");
       return result;
     },
@@ -338,6 +395,30 @@ export function createEngine({ lk, store }) {
           .filter((document) => document.isHidden)
           .map((document) => ({ id: document.id, name: document.name }))
       };
+    },
+
+    registerFoundryMapping(resourceId, { foundryUuid = null, pages = [] } = {}) {
+      const resource = store.getResource(resourceId);
+      if (!resource) throw syncError("NOT_FOUND", "Import the journal before registering Foundry ids");
+      if (foundryUuid) store.setResourceFoundryUuid(resourceId, foundryUuid);
+      const registered = [];
+      for (const page of pages) {
+        if (!page?.documentId || !page.foundryUuid) continue;
+        const document = store.getDocument(resourceId, page.documentId);
+        if (!document) continue;
+        store.setDocumentFoundryUuid(resourceId, page.documentId, page.foundryUuid);
+        registered.push({ documentId: page.documentId, foundryUuid: page.foundryUuid });
+      }
+      store.audit("foundry", "register-uuids", { resourceId, foundryUuid, pages: registered.length });
+      return { resourceId, foundryUuid, pages: registered };
+    },
+
+    listConflicts() {
+      return store.listConflicts();
+    },
+
+    listDeletions() {
+      return store.listDeletions();
     }
   };
 }
@@ -352,19 +433,3 @@ function diffSafe(blocks) {
   }
 }
 
-function replaceBlock(blocks, blockId, replacement) {
-  const next = structuredClone(blocks);
-  const walk = (list) => {
-    for (let index = 0; index < list.length; index += 1) {
-      if (list[index]?.id === blockId) {
-        list[index] = structuredClone(replacement);
-        return true;
-      }
-      if (Array.isArray(list[index].children) && walk(list[index].children)) return true;
-      if (Array.isArray(list[index].rows) && walk(list[index].rows)) return true;
-    }
-    return false;
-  };
-  if (!walk(next)) return null;
-  return next;
-}

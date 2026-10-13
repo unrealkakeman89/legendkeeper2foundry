@@ -1,21 +1,35 @@
-import { cloneBlocks, findBlock } from "./blocks.mjs";
-import { diffBlocks } from "./diff.mjs";
+import { findBlock } from "./blocks.mjs";
+import { contentFromRunEdits, describeRuns } from "./runs.mjs";
 
-export function setParagraphText(blocks, blockId, text) {
-  const next = cloneBlocks(blocks);
-  const block = findBlock(next, blockId);
+export { contentFromRunEdits, describeRuns };
+
+export function paragraphContent(blocks, blockId) {
+  const block = findBlock(blocks, blockId);
   if (!block || block.kind !== "paragraph") {
     const error = new Error("Only an existing paragraph can be edited in this pass");
     error.code = "NOT_A_PARAGRAPH";
     throw error;
   }
-  block.content = [{ text }];
-  return next;
+  return block.content ?? [];
 }
 
-export function planParagraphEdit(baseline, blockId, text) {
-  const edited = setParagraphText(baseline, blockId, text);
-  return { edited, operations: diffBlocks(baseline, edited) };
+/** Change the text of existing runs. Marks, mentions, links, and breaks stay on those runs. */
+export function planRunEdit(blocks, blockId, textsByIndex) {
+  const content = contentFromRunEdits(paragraphContent(blocks, blockId), textsByIndex);
+  return { blockId, content, operations: [{ op: "update", blockId }] };
+}
+
+export function replaceParagraphContent(blocks, blockId, content) {
+  return (blocks ?? []).map((block) => {
+    if (block?.id !== blockId) {
+      return {
+        ...block,
+        ...(Array.isArray(block?.children) ? { children: replaceParagraphContent(block.children, blockId, content) } : {}),
+        ...(Array.isArray(block?.rows) ? { rows: replaceParagraphContent(block.rows, blockId, content) } : {})
+      };
+    }
+    return { ...block, content };
+  });
 }
 
 export const SYNC_STATES = ["pending", "synced", "failed"];
