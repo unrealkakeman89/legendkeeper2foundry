@@ -138,14 +138,43 @@ export async function importIntoWorld(world, serviceUrl, token, { parentId = nul
   return created.map((item) => item.doc);
 }
 
-export async function createLegendKeeperJournal(world, serviceUrl, token, { name }) {
+export function newClientResourceId() {
+  return `r${crypto.randomUUID().replaceAll("-", "").slice(0, 23)}`;
+}
+
+export async function createLegendKeeperJournal(world, serviceUrl, token, { name, id = newClientResourceId() }) {
   const created = await request(serviceUrl, token, "/v1/journals", {
     method: "POST",
     mutate: true,
-    body: { name }
+    body: { name, id }
   });
   assertPersistable(created.journal.persist);
-  return world.createJournal(created.journal.persist);
+  const resourceId = created.journal.persist.flags.legendkeeper.resourceId;
+  let doc = world.findJournal ? await world.findJournal(resourceId) : null;
+  if (!doc) {
+    try {
+      doc = await world.createJournal(created.journal.persist);
+    } catch (error) {
+      error.resourceId = resourceId;
+      throw error;
+    }
+  }
+  const pages = journalPages(doc);
+  try {
+    await registerFoundryMapping(serviceUrl, token, {
+      resourceId,
+      foundryUuid: doc.uuid ?? null,
+      pages: pages.map((page) => ({
+        documentId: page.system?.lkDocumentId,
+        foundryUuid: page.uuid
+      })).filter((page) => page.documentId && page.foundryUuid)
+    });
+  } catch (error) {
+    error.resourceId = resourceId;
+    error.journal = doc;
+    throw error;
+  }
+  return doc;
 }
 
 export function shareJournal(persist, gmOnly) {
@@ -172,13 +201,13 @@ export async function saveParagraph(serviceUrl, token, { resourceId, documentId,
   }
 }
 
-export function paragraphSaveUpdate(system, blockId, result) {
+export function paragraphSaveUpdate(system, blockId, result, baseVersion = system.version) {
   const failed = result.syncState !== "synced";
   return {
     ...system,
     syncState: result.syncState,
     syncError: failed ? result.syncError : "",
-    draft: failed ? { blockId, baseVersion: system.version, content: result.retained } : null,
+    draft: failed ? { blockId, baseVersion, content: result.retained } : null,
     version: failed ? system.version : result.version,
     blocks: failed ? system.blocks : redactBlocks(replaceParagraphContent(system.blocks, blockId, result.retained))
   };

@@ -68,8 +68,25 @@ export function createEngine({ lk, store }) {
     return ids;
   }
 
-  function knownVersion(stored, baseVersion) {
-    return [stored?.version, stored?.baseline?.version, stored?.remote?.version].includes(baseVersion);
+  function baselineVersion(stored) {
+    return stored?.baseline?.version || stored?.version || "";
+  }
+
+  /**
+   * A normal save may use the baseline version, or a remote version only when
+   * that paragraph is unchanged from the baseline the editor source came from.
+   * An overwrite flag on this path is ignored.
+   */
+  function writePermission(stored, baseVersion, blockId) {
+    if (baseVersion && baseVersion === baselineVersion(stored)) return "baseline";
+    if (
+      baseVersion
+      && stored?.remote?.version === baseVersion
+      && !sameBlockConflict(stored.baseline.blocks, stored.remote.blocks, blockId)
+    ) {
+      return "remote-unchanged";
+    }
+    return null;
   }
 
   async function confirmParagraph(resourceId, documentId, blockId, content, version, opId, actor) {
@@ -116,6 +133,29 @@ export function createEngine({ lk, store }) {
     };
   }
 
+  async function overwriteParagraph(resourceId, documentId, { blockId, content, actor }) {
+    const stored = store.getDocument(resourceId, documentId);
+    if (!stored?.baseline) throw syncError("NO_BASELINE", "Import the page before editing it");
+    const baselineBlock = findBlock(stored.baseline.blocks, blockId);
+    if (!baselineBlock || baselineBlock.kind !== "paragraph" || !isRunArray(content)) {
+      return { state: "failed", code: "NOT_A_PARAGRAPH", error: "Only an existing paragraph can be kept", retained: content, operations: [] };
+    }
+    const problem = runEditProblem(baselineBlock.content ?? [], content);
+    if (problem) {
+      return { state: "failed", code: problem, error: "The chosen runs do not match the paragraph", retained: content, operations: [] };
+    }
+    const fresh = await lk.getBlocks(resourceId, documentId);
+    store.setRemote(resourceId, documentId, fresh);
+    const written = applyTextEdits(baselineBlock.content ?? [], content);
+    const opId = store.beginOperation({
+      opKey: newOperationKey("overwrite"),
+      kind: "edit",
+      payload: { resourceId, documentId, blockId, content: written, overwrite: true }
+    });
+    const saved = await confirmParagraph(resourceId, documentId, blockId, written, fresh.version, opId, actor);
+    return { state: "synced", version: saved.version, operations: [{ op: "update", blockId }] };
+  }
+
   return {
     async importBranch({ parentId = null, actor = "gm" } = {}) {
       const listed = await lk.listResources();
@@ -132,6 +172,13 @@ export function createEngine({ lk, store }) {
 
     async createJournal({ name, id = newResourceId(), padBytes, actor = "gm" } = {}) {
       const idempotencyKey = `create-${id}`;
+      const prior = store.findOperationByKey?.(idempotencyKey);
+      if (store.getResource(id) || prior?.state === "completed") {
+        const resource = await lk.getResource(id);
+        const journal = await rememberResource(resource);
+        store.audit(actor, "reconcile-resource", { id });
+        return { resourceId: id, journal, reconciled: true };
+      }
       const opId = store.beginOperation({
         opKey: idempotencyKey,
         kind: "create-resource",
@@ -204,7 +251,8 @@ export function createEngine({ lk, store }) {
       };
     },
 
-    async editParagraph(resourceId, documentId, { baseVersion, blockId, content, actor = "gm" }) {
+    async editParagraph(resourceId, documentId, { baseVersion, blockId, content, actor = "gm", overwrite: _overwrite = false } = {}) {
+      void _overwrite;
       const stored = store.getDocument(resourceId, documentId);
       if (!stored?.baseline) throw syncError("NO_BASELINE", "Import the page before editing it");
       const baselineBlock = findBlock(stored.baseline.blocks, blockId);
@@ -239,10 +287,12 @@ export function createEngine({ lk, store }) {
         payload: { resourceId, documentId, baseVersion, blockId, content: written }
       });
       try {
-        if (!knownVersion(stored, baseVersion)) {
+        const permission = writePermission(stored, baseVersion, blockId);
+        if (!permission) {
           return await reconcileParagraph(resourceId, documentId, blockId, written, actor, opId);
         }
-        const fresh = await confirmParagraph(resourceId, documentId, blockId, written, baseVersion, opId, actor);
+        const version = permission === "baseline" ? baselineVersion(stored) : stored.remote.version;
+        const fresh = await confirmParagraph(resourceId, documentId, blockId, written, version, opId, actor);
         return { state: "synced", version: fresh.version, operations: [{ op: "update", blockId }] };
       } catch (error) {
         if (error.code === "CRASH_AFTER_WRITE") throw error;
@@ -320,8 +370,7 @@ export function createEngine({ lk, store }) {
       }
       const nextContent = choice === "foundry" ? conflict.foundry?.content : content;
       if (!Array.isArray(nextContent)) throw syncError("MERGE_REQUIRED", "Manual merge requires the merged paragraph runs");
-      const result = await this.editParagraph(conflict.resourceId, conflict.documentId, {
-        baseVersion: fresh.version,
+      const result = await overwriteParagraph(conflict.resourceId, conflict.documentId, {
         blockId: conflict.blockId,
         content: nextContent,
         actor
@@ -400,17 +449,17 @@ export function createEngine({ lk, store }) {
     registerFoundryMapping(resourceId, { foundryUuid = null, pages = [] } = {}) {
       const resource = store.getResource(resourceId);
       if (!resource) throw syncError("NOT_FOUND", "Import the journal before registering Foundry ids");
-      if (foundryUuid) store.setResourceFoundryUuid(resourceId, foundryUuid);
+      if (foundryUuid && !resource.foundryUuid) store.setResourceFoundryUuid(resourceId, foundryUuid);
       const registered = [];
       for (const page of pages) {
         if (!page?.documentId || !page.foundryUuid) continue;
         const document = store.getDocument(resourceId, page.documentId);
         if (!document) continue;
-        store.setDocumentFoundryUuid(resourceId, page.documentId, page.foundryUuid);
-        registered.push({ documentId: page.documentId, foundryUuid: page.foundryUuid });
+        if (!document.foundryUuid) store.setDocumentFoundryUuid(resourceId, page.documentId, page.foundryUuid);
+        registered.push({ documentId: page.documentId, foundryUuid: document.foundryUuid || page.foundryUuid });
       }
       store.audit("foundry", "register-uuids", { resourceId, foundryUuid, pages: registered.length });
-      return { resourceId, foundryUuid, pages: registered };
+      return { resourceId, foundryUuid: resource.foundryUuid || foundryUuid, pages: registered };
     },
 
     listConflicts() {

@@ -1,8 +1,8 @@
 import { defineLegendKeeperPageModel } from "./model.mjs";
 import { registerSheets } from "./sheets.mjs";
-import { DEFAULT_SERVICE_URL, SERVICE_URL_SETTING, createLegendKeeperJournal, importIntoWorld as importWorld, pairService, pollUpdates } from "./client.mjs";
+import { DEFAULT_SERVICE_URL, SERVICE_URL_SETTING, acquireLeader, createLegendKeeperJournal, importIntoWorld as importWorld, newClientResourceId, pairService, pollUpdates } from "./client.mjs";
 import { MODULE_ID } from "./domain/journal.mjs";
-import { applyPolledPageUpdates, startAutomaticSync } from "./review.mjs";
+import { applyPolledPageUpdates, noteSyncStatus, startAutomaticSync } from "./review.mjs";
 import { runSetup, setupForm } from "./setup.mjs";
 
 Hooks.once("init", () => {
@@ -49,6 +49,22 @@ Hooks.once("init", () => {
     default: false,
     restricted: true
   });
+  game.settings.register(MODULE_ID, "pollIntervalSeconds", {
+    name: "LEGENDKEEPER.PollInterval",
+    hint: "LEGENDKEEPER.PollIntervalHint",
+    scope: "world",
+    config: true,
+    type: Number,
+    default: 90,
+    range: { min: 60, max: 120, step: 1 },
+    restricted: true
+  });
+  game.settings.register(MODULE_ID, "pendingResourceId", {
+    scope: "client",
+    config: false,
+    type: String,
+    default: ""
+  });
 });
 
 function serviceUrl() {
@@ -64,10 +80,17 @@ Hooks.once("ready", () => {
   const sync = startAutomaticSync({
     automaticSync: game.settings.get(MODULE_ID, "automaticSync") === true,
     liveProofAccepted: game.settings.get(MODULE_ID, "liveProofAccepted") === true,
+    intervalMs: Number(game.settings.get(MODULE_ID, "pollIntervalSeconds")) * 1000,
+    acquireLeader: (ttlMs) => acquireLeader(serviceUrl(), accessToken(), ttlMs),
     poll: async () => {
       const result = await pollUpdates(serviceUrl(), accessToken());
       const pages = game.journal.contents.flatMap((journal) => journal.pages.contents);
       await applyPolledPageUpdates(pages, result.updates ?? [], (page, system) => page.update({ system }));
+    },
+    onStatus: (status) => {
+      noteSyncStatus(status);
+      if (status.state === "failed") ui.notifications.error(status.error);
+      if (status.state === "held") ui.notifications.warn(status.error);
     }
   });
   if (sync.started) ui.notifications.info("LegendKeeper automatic sync is on for this GM session.");
@@ -94,12 +117,24 @@ Hooks.on("renderJournalDirectory", (_app, html) => {
   button.addEventListener("click", async () => {
     const name = await foundryNamePrompt();
     if (!name) return;
-    await createLegendKeeperJournal(
-      { createJournal: (data) => JournalEntry.create(data) },
-      serviceUrl(),
-      accessToken(),
-      { name }
-    );
+    const pending = game.settings.get(MODULE_ID, "pendingResourceId") || newClientResourceId();
+    await game.settings.set(MODULE_ID, "pendingResourceId", pending);
+    try {
+      await createLegendKeeperJournal(
+        {
+          createJournal: (data) => JournalEntry.create(data),
+          findJournal: (resourceId) => game.journal.contents.find((journal) => journal.getFlag(MODULE_ID, "resourceId") === resourceId) ?? null
+        },
+        serviceUrl(),
+        accessToken(),
+        { name, id: pending }
+      );
+      await game.settings.set(MODULE_ID, "pendingResourceId", "");
+    } catch (error) {
+      ui.notifications.error(error.resourceId
+        ? "LegendKeeper journal was not finished. Create it again to continue the same journal."
+        : error.message);
+    }
   });
   root.prepend(button);
   root.prepend(setup);

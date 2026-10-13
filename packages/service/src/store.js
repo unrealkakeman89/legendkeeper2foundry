@@ -345,6 +345,10 @@ function createStore(db, path) {
       const row = db.prepare("SELECT * FROM operations WHERE id = ?").get(id);
       return row ? hydrateOperation(row) : null;
     },
+    findOperationByKey(opKey) {
+      const row = db.prepare("SELECT * FROM operations WHERE op_key = ?").get(opKey);
+      return row ? hydrateOperation(row) : null;
+    },
     addConflict(conflict) {
       const info = db.prepare(`INSERT INTO conflicts
         (lk_resource_id, lk_document_id, block_id, lk_json, foundry_json, state, created_at)

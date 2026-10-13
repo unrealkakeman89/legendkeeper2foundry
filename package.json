@@ -9,7 +9,9 @@
     "test": "node --test --test-concurrency=1 packages/inventory/test/*.test.js packages/service/test/*.test.js packages/foundry/test/*.test.js",
     "inventory": "node packages/inventory/src/cli.js",
     "service": "node packages/service/src/main.js",
-    "live": "node scripts/live-round-trip.mjs"
+    "live": "node scripts/live-round-trip.mjs",
+    "live-api": "node scripts/live-api-round-trip.mjs",
+    "live-foundry": "node scripts/foundry-sheet-gate.mjs"
   },
   "workspaces": [
     "packages/*"

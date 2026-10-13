@@ -1,9 +1,8 @@
 import { fetchEditorTree, fetchGmView, fetchReviews, localPageUpdate, paragraphSaveUpdate, resolveConflict, reviewDeletion, saveParagraph } from "./client.mjs";
-import { preparePageContext, sheetMode } from "./context.mjs";
-import { paragraphContent } from "./domain/editor.mjs";
+import { decodeSourcePayload, preparePageContext, sheetMode } from "./context.mjs";
 import { MODULE_ID } from "./domain/journal.mjs";
 import { contentFromRunEdits } from "./domain/runs.mjs";
-import { performReview, renderReviewPanel } from "./review.mjs";
+import { currentSyncStatus, performReview, renderReviewPanel, renderSyncStatus } from "./review.mjs";
 
 function serviceSetting(key) {
   return game.settings.get(MODULE_ID, key);
@@ -11,10 +10,33 @@ function serviceSetting(key) {
 
 export function readRunTexts(root) {
   const values = [];
-  for (const input of root.querySelectorAll("input[data-run-index]")) {
+  const inputs = root?.querySelectorAll?.("input[data-run-index]") ?? [];
+  for (const input of inputs) {
     values[Number(input.dataset.runIndex)] = input.value;
   }
   return values;
+}
+
+function editorFieldset(root) {
+  return root?.querySelector?.(".lk-runs[data-block-id]") ?? null;
+}
+
+/** Keep text the GM is typing when Foundry rebuilds the sheet. */
+export function captureTypedDraft(root) {
+  const fieldset = editorFieldset(root);
+  if (!fieldset) return null;
+  const hidden = fieldset.querySelector?.('input[name="sourceRuns"]');
+  let source;
+  try {
+    source = decodeSourcePayload(hidden?.value ?? "");
+  } catch {
+    return null;
+  }
+  if (source.id !== fieldset.dataset.blockId) return null;
+  const content = contentFromRunEdits(source.content, readRunTexts(fieldset));
+  const dirty = content.some((run, index) => JSON.stringify(run) !== JSON.stringify(source.content[index]));
+  if (!dirty) return null;
+  return { blockId: source.id, baseVersion: fieldset.dataset.baseVersion || "", content };
 }
 
 export async function commitParagraphSave({ system, root, serviceUrl, token, isGM, save = saveParagraph }) {
@@ -23,17 +45,30 @@ export async function commitParagraphSave({ system, root, serviceUrl, token, isG
     error.code = "NOT_GM";
     throw error;
   }
-  const blockId = root.querySelector("[data-block-id]")?.dataset.blockId ?? "";
-  const source = system.draft?.blockId === blockId ? system.draft.content : paragraphContent(system.blocks, blockId);
-  const content = contentFromRunEdits(source, readRunTexts(root));
+  const fieldset = editorFieldset(root);
+  if (!fieldset?.dataset?.blockId) {
+    const error = new Error("The editor paragraph is missing");
+    error.code = "INVALID_SOURCE";
+    throw error;
+  }
+  const hidden = fieldset.querySelector?.('input[name="sourceRuns"]');
+  const source = decodeSourcePayload(hidden?.value ?? "");
+  if (source.id !== fieldset.dataset.blockId) {
+    const error = new Error("The editor source does not match the paragraph being saved");
+    error.code = "INVALID_SOURCE";
+    throw error;
+  }
+  const blockId = fieldset.dataset.blockId;
+  const baseVersion = fieldset.dataset.baseVersion || "";
+  const content = contentFromRunEdits(source.content, readRunTexts(fieldset));
   const result = await save(serviceUrl, token, {
-    resourceId: system.lkResourceId,
-    documentId: system.lkDocumentId,
-    baseVersion: system.version,
+    resourceId: fieldset.dataset.resourceId,
+    documentId: fieldset.dataset.documentId,
+    baseVersion,
     blockId,
     content
   });
-  return { result, system: paragraphSaveUpdate(system, blockId, result) };
+  return { result, system: paragraphSaveUpdate(system, blockId, result, baseVersion) };
 }
 
 export function registerSheets({ foundry, DocumentSheetConfig, JournalEntry, JournalEntryPage }) {
@@ -57,10 +92,12 @@ export function registerSheets({ foundry, DocumentSheetConfig, JournalEntry, Jou
       const context = await super._prepareContext(options);
       const token = serviceSetting("accessToken");
       const gm = sheetMode({ isGM: Boolean(game.user?.isGM), token });
+      const typed = captureTypedDraft(this.element);
       let system = localPageUpdate(this.document.system, this.document.system.blocks);
       system = { ...this.document.system, blocks: system.blocks };
+      if (typed) system = { ...system, draft: typed };
       let remoteNote = "";
-      if (gm && system.lkResourceId && system.lkDocumentId) {
+      if (gm && system.lkResourceId && system.lkDocumentId && !typed) {
         try {
           const tree = await fetchEditorTree(serviceSetting("serviceUrl"), token, system.lkResourceId, system.lkDocumentId);
           if (tree.remoteVersion && tree.remoteVersion !== system.version && system.draft) {
@@ -149,8 +186,9 @@ export function registerSheets({ foundry, DocumentSheetConfig, JournalEntry, Jou
         name: this.document.name,
         hiddenDocuments,
         review,
-        syncState: "synced",
-        syncLabel: "Synced",
+        syncStatus: renderSyncStatus(currentSyncStatus()),
+        syncState: currentSyncStatus().state || "synced",
+        syncLabel: currentSyncStatus().label || "Synced",
         rendered: ""
       };
     }

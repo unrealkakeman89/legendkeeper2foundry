@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -142,6 +142,50 @@ test("a version change on a different block merges and does not open a conflict"
   store.close();
 });
 
+test("a remote version cannot overwrite a paragraph that changed", async () => {
+  const route = readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+  assert.equal(route.includes("overwrite"), false);
+  const lk = createMemoryLegendKeeper();
+  lk.seed({
+    id: "r-remote0000000000000000",
+    name: "Remote",
+    updatedAt: "2026-10-13T00:00:00.000Z",
+    documents: [{
+      id: "doc1",
+      name: "Overview",
+      type: "page",
+      rank: "a0",
+      blocks: [{ id: "p1", kind: "paragraph", content: [{ text: "Old" }] }]
+    }]
+  });
+  const { engine, store } = world(lk);
+  await engine.importBranch();
+  const remoteVersion = lk.debugSetBlocks("r-remote0000000000000000", "doc1", [
+    { id: "p1", kind: "paragraph", content: [{ text: "Remote" }] }
+  ]);
+  store.setRemote("r-remote0000000000000000", "doc1", await lk.getBlocks("r-remote0000000000000000", "doc1"));
+  const writes = lk.calls.updateBlock;
+  const result = await engine.editParagraph("r-remote0000000000000000", "doc1", {
+    baseVersion: remoteVersion,
+    blockId: "p1",
+    content: [{ text: "Old edit" }],
+    overwrite: true
+  });
+  assert.equal(result.state, "failed");
+  assert.equal(result.code, "VERSION_MISMATCH");
+  assert.equal(lk.calls.updateBlock, writes);
+  const remote = await lk.getBlocks("r-remote0000000000000000", "doc1");
+  assert.equal(remote.blocks[0].content[0].text, "Remote");
+  const held = store.getDocument("r-remote0000000000000000", "doc1");
+  assert.equal(held.baseline.blocks[0].content[0].text, "Old");
+  engine.acquireLeader("gm-1", 60_000);
+  const kept = await engine.resolveConflict(result.conflictId, { choice: "foundry", leaderClientId: "gm-1" });
+  assert.equal(kept.state, "synced");
+  const written = await lk.getBlocks("r-remote0000000000000000", "doc1");
+  assert.equal(written.blocks[0].content[0].text, "Old edit");
+  store.close();
+});
+
 test("timestamps do not prove the block tree is unchanged", async () => {
   const lk = createMemoryLegendKeeper();
   lk.seed({
@@ -231,6 +275,21 @@ test("bulk export uses createMany and import does not", async () => {
   ]);
   assert.equal(lk.calls.createMany, 1);
   const created = await engine.createJournal({ name: "Single", id: "r-single000000000000000" });
+  assert.equal(lk.calls.createResource, 1);
+  const again = await engine.createJournal({ name: "Single", id: "r-single000000000000000" });
+  assert.equal(again.reconciled, true);
+  assert.equal(lk.calls.createResource, 1);
+  const documentId = again.journal.persist.pages[0].system.lkDocumentId;
+  engine.registerFoundryMapping("r-single000000000000000", {
+    foundryUuid: "JournalEntry.once",
+    pages: [{ documentId, foundryUuid: "JournalEntryPage.once" }]
+  });
+  engine.registerFoundryMapping("r-single000000000000000", {
+    foundryUuid: "JournalEntry.other",
+    pages: [{ documentId, foundryUuid: "JournalEntryPage.other" }]
+  });
+  assert.equal(store.getResource("r-single000000000000000").foundryUuid, "JournalEntry.once");
+  assert.equal(store.getDocument("r-single000000000000000", documentId).foundryUuid, "JournalEntryPage.once");
   assert.equal(created.journal.persist.flags.legendkeeper.resourceId, "r-single000000000000000");
   assert.equal(created.journal.persist.ownership.default, 0);
   const tab = await engine.createDocument("r-single000000000000000", { name: "History", type: "page" });

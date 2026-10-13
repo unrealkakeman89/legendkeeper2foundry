@@ -52,6 +52,41 @@ export async function performReview(action, { conflictId, deletionId, isGM, toke
   throw error;
 }
 
+const STATUS_LABELS = {
+  synced: "Synced",
+  failed: "Sync failed",
+  held: "Another GM is synchronizing",
+  pending: "Pending"
+};
+
+let syncStatus = { state: "", error: "", label: "" };
+
+export function noteSyncStatus(status) {
+  syncStatus = {
+    state: status?.state || "",
+    error: status?.error || "",
+    label: STATUS_LABELS[status?.state] || ""
+  };
+  return syncStatus;
+}
+
+export function currentSyncStatus() {
+  return syncStatus;
+}
+
+export function renderSyncStatus(status = currentSyncStatus()) {
+  if (!status?.state) return "";
+  const label = status.label || STATUS_LABELS[status.state] || status.state;
+  const error = status.error ? `<p class="lk-sync-error">${escapeHtml(status.error)}</p>` : "";
+  return `<p class="lk-sync-status" data-state="${escapeHtml(status.state)}">${escapeHtml(label)}</p>${error}`;
+}
+
+export function clampPollInterval(milliseconds) {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value)) return 90_000;
+  return Math.min(120_000, Math.max(60_000, value));
+}
+
 /** Pages with an unsynced draft are left untouched. */
 export async function applyPolledPageUpdates(pages, updates, updatePage) {
   const safe = updatesSafeToApply(pages, updates);
@@ -66,15 +101,57 @@ export async function applyPolledPageUpdates(pages, updates, updatePage) {
   return applied;
 }
 
-/** Automatic polling stays off until a GM accepts the live proof and turns the setting on. */
-export function startAutomaticSync({ automaticSync = false, liveProofAccepted = false, poll } = {}) {
-  if (!automaticSync || !liveProofAccepted || typeof poll !== "function") return { started: false, stop() {} };
+/**
+ * Automatic polling stays off until a GM accepts both live gates and turns the setting on.
+ * One tick runs at a time. A lease held by another GM is not reported as a service failure.
+ */
+export function startAutomaticSync({
+  automaticSync = false,
+  liveProofAccepted = false,
+  poll,
+  acquireLeader,
+  intervalMs = 90_000,
+  onStatus = noteSyncStatus
+} = {}) {
+  if (!automaticSync || !liveProofAccepted || typeof poll !== "function" || typeof acquireLeader !== "function") {
+    return { started: false, stop() {} };
+  }
+  const interval = clampPollInterval(intervalMs);
+  let running = false;
+  let stopped = false;
+  async function tick() {
+    if (stopped) return { skipped: true };
+    if (running) return { skipped: true };
+    running = true;
+    try {
+      const lease = await acquireLeader(interval * 2);
+      if (!lease?.acquired) {
+        onStatus?.({ state: "held", error: "Another GM holds the synchronization lease." });
+        return { skipped: false, state: "held" };
+      }
+      await poll();
+      onStatus?.({ state: "synced", error: "" });
+      return { skipped: false, state: "synced" };
+    } catch (error) {
+      if (error?.code === "NOT_LEADER") {
+        onStatus?.({ state: "held", error: "Another GM holds the synchronization lease." });
+        return { skipped: false, state: "held" };
+      }
+      onStatus?.({ state: "failed", error: error?.message || "Synchronization failed" });
+      return { skipped: false, state: "failed" };
+    } finally {
+      running = false;
+    }
+  }
   const timer = setInterval(() => {
-    poll().catch(() => {});
-  }, 15_000);
+    tick();
+  }, interval);
   return {
     started: true,
+    interval,
+    tick,
     stop() {
+      stopped = true;
       clearInterval(timer);
     }
   };

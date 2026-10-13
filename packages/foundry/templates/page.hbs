@@ -7,7 +7,8 @@
   {{/if}}
   <div class="lk-body">{{{rendered}}}</div>
   {{#if editable}}
-    <fieldset class="lk-runs" data-block-id="{{editBlockId}}">
+    <fieldset class="lk-runs" data-block-id="{{editBlockId}}" data-base-version="{{baseVersion}}" data-resource-id="{{lkResourceId}}" data-document-id="{{lkDocumentId}}">
+      <input type="hidden" name="sourceRuns" value="{{sourceRuns}}">
       <legend>Paragraph runs</legend>
       {{#each runs}}
         <label class="lk-run" data-kind="{{kind}}" data-run-index="{{index}}">
