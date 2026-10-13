@@ -4,12 +4,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { unchangedBlocksMatch } from "../../foundry/module/domain/compare.mjs";
+import { diffBlocks } from "../../foundry/module/domain/diff.mjs";
 import { createEngine } from "../src/engine.js";
 import { createMemoryLegendKeeper } from "../src/memory-lk.js";
 import { openStore } from "../src/store.js";
 
 const originalBlocks = [
-  { id: "p1", kind: "paragraph", content: [{ text: "The temple was abandoned." }] },
+  {
+    id: "p1",
+    kind: "paragraph",
+    content: [
+      { text: "The temple", bold: true },
+      { text: " of " },
+      { mention: { resourceId: "r-tython000000000000000", text: "Tython" } },
+      { text: " is documented at " },
+      { text: "the archive", link: "https://legendkeeper.test/temple" },
+      { break: true },
+      { text: "was abandoned." }
+    ]
+  },
   { id: "h1", kind: "heading", level: 2, content: [{ text: "History" }] },
   { id: "img", kind: "image", url: "https://assets.legendkeeper.test/temple.png", alt: "Temple gates", layout: "wrapRight", width: 40 },
   { id: "call", kind: "callout", tone: "warning", children: [{ id: "cp", kind: "paragraph", content: [{ text: "Do not enter." }] }] },
@@ -59,6 +72,9 @@ test("round trip changes one paragraph and preserves every other block", async (
   // 3. Public block ids, formatting, and order match. Restricted content is not in the journal.
   const page = envelope.persist.pages.find((item) => item.system.lkDocumentId === "doc-overview");
   assert.deepEqual(page.system.blocks.map((block) => block.id), ["p1", "h1", "img", "call", "uns"]);
+  assert.equal(page.sort, 100000);
+  assert.equal(envelope.persist.systemPresentation, undefined);
+  assert.equal(page.system.properties[0].title, "Region");
   assert.equal(page.system.blocks[2].width, 40);
   assert.equal(page.system.blocks[2].alt, "Temple gates");
   assert.equal(page.type, "legendkeeper.page");
@@ -73,25 +89,58 @@ test("round trip changes one paragraph and preserves every other block", async (
   const baseline = store.getDocument("r-tython000000000000000", "doc-overview");
   assert.deepEqual(baseline.baseline.blocks.map((block) => block.id), originalBlocks.map((block) => block.id));
 
-  // 4 and 5. Edit one paragraph and sync it by the original block id.
-  const edited = structuredClone(baseline.baseline.blocks);
-  edited[0] = { ...edited[0], content: [{ text: "The temple was destroyed." }] };
-  const saved = await engine.editDocument("r-tython000000000000000", "doc-overview", {
+  // A redacted tree omits the secret. That payload cannot delete it.
+  const redacted = baseline.baseline.blocks.filter((block) => block.kind !== "secret");
+  assert.throws(() => diffBlocks(baseline.baseline.blocks, redacted), /secret block/);
+  const refused = await engine.editDocument("r-tython000000000000000", "doc-overview", {
     baseVersion: baseline.version,
-    blocks: edited
+    blocks: redacted
+  });
+  assert.equal(refused.code, "FULL_TREE_REFUSED");
+  assert.equal(lk.calls.deleteBlock, 0);
+  const collapsed = await engine.editParagraph("r-tython000000000000000", "doc-overview", {
+    baseVersion: baseline.version,
+    blockId: "p1",
+    content: [{ text: "The temple was destroyed." }]
+  });
+  assert.equal(collapsed.code, "FORMAT_LOSS");
+  const unchanged = await lk.getBlocks("r-tython000000000000000", "doc-overview");
+  assert.equal(unchanged.blocks[0].content[6].text, "was abandoned.");
+  assert.equal(unchanged.blocks.find((block) => block.id === "sec").children[0].content[0].text, "The hidden ritual.");
+  const kept = store.getDocument("r-tython000000000000000", "doc-overview");
+  assert.equal(kept.baseline.blocks[0].content[6].text, "was abandoned.");
+  assert.equal(kept.draft.content[0].text, "The temple was destroyed.");
+
+  // 4 and 5. Edit one run and sync it by the original block id.
+  const content = structuredClone(baseline.baseline.blocks[0].content);
+  content[6] = { ...content[6], text: "was destroyed." };
+  const saved = await engine.editParagraph("r-tython000000000000000", "doc-overview", {
+    baseVersion: baseline.version,
+    blockId: "p1",
+    content
   });
   assert.equal(saved.state, "synced");
   assert.deepEqual(saved.operations.map((operation) => operation.op), ["update"]);
   assert.equal(saved.operations[0].blockId, "p1");
   assert.equal(lk.calls.updateBlock, 1);
+  assert.equal(lk.calls.deleteBlock, 0);
   assert.equal(lk.calls.replaceBlocks, 0);
   assert.equal(lk.calls.assignBlockIds, 0);
 
-  // 6 and 7. Fetch again. Unchanged blocks, including the unsupported block, match the snapshot.
+  // 6 and 7. Fetch again. Unrelated runs and blocks, including secret and unsupported, match.
   const after = await lk.getBlocks("r-tython000000000000000", "doc-overview");
-  assert.equal(after.blocks[0].content[0].text, "The temple was destroyed.");
+  const afterRuns = after.blocks[0].content;
+  assert.equal(afterRuns[0].text, "The temple");
+  assert.equal(afterRuns[0].bold, true);
+  assert.equal(afterRuns[2].mention.resourceId, "r-tython000000000000000");
+  assert.equal(afterRuns[2].mention.text, "Tython");
+  assert.equal(afterRuns[4].link, "https://legendkeeper.test/temple");
+  assert.equal(afterRuns[4].text, "the archive");
+  assert.equal(afterRuns[5].break, true);
+  assert.equal(afterRuns[6].text, "was destroyed.");
   assert.deepEqual(unchangedBlocksMatch(before.blocks, after.blocks, "p1"), []);
   assert.deepEqual(after.blocks.find((block) => block.id === "uns"), { id: "uns", kind: "unsupported" });
+  assert.equal(after.blocks.find((block) => block.id === "sec").children[0].content[0].text, "The hidden ritual.");
 
   // 8. Restart the service. Mapping and the accepted baseline remain.
   store.close();
@@ -99,7 +148,8 @@ test("round trip changes one paragraph and preserves every other block", async (
   const survived = reopened.getDocument("r-tython000000000000000", "doc-overview");
   assert.equal(reopened.getResource("r-tython000000000000000").name, "Tython");
   assert.equal(survived.version, after.version);
-  assert.equal(survived.baseline.blocks[0].content[0].text, "The temple was destroyed.");
+  assert.equal(survived.baseline.blocks[0].content[6].text, "was destroyed.");
+  assert.equal(survived.draft, null);
   assert.deepEqual(survived.baseline.blocks.find((block) => block.id === "uns"), { id: "uns", kind: "unsupported" });
   reopened.close();
 });

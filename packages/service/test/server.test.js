@@ -108,3 +108,62 @@ test("service authentication does not trust isGM, CORS, or a missing token", asy
     await server.close();
   }
 });
+
+test("leader, poll, deletion, and conflict actions use the paired session", async () => {
+  const server = await start();
+  try {
+    const token = await pair(server.url);
+    const other = await fetch(`${server.url}/v1/pair`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-legendkeeper-request": "1",
+        origin: "http://foundry.example"
+      },
+      body: JSON.stringify({ pairingCode: "pair-once", clientId: "gm-2" })
+    });
+    const otherToken = (await other.json()).token;
+    const headersFor = (bearer) => ({
+      authorization: `Bearer ${bearer}`,
+      "content-type": "application/json",
+      "x-legendkeeper-request": "1",
+      origin: "http://foundry.example"
+    });
+    const leader = await fetch(`${server.url}/v1/sync/leader`, {
+      method: "POST",
+      headers: headersFor(token),
+      body: JSON.stringify({ clientId: "gm-2", ttlMs: 60_000 })
+    });
+    assert.equal((await leader.json()).clientId, "gm-1");
+    const spoofedPoll = await fetch(`${server.url}/v1/sync/poll`, {
+      method: "POST",
+      headers: headersFor(otherToken),
+      body: JSON.stringify({ clientId: "gm-1", full: true })
+    });
+    assert.equal(spoofedPoll.status, 409);
+    const poll = await fetch(`${server.url}/v1/sync/poll`, {
+      method: "POST",
+      headers: headersFor(token),
+      body: JSON.stringify({ clientId: "gm-2", full: false })
+    });
+    assert.equal(poll.status, 200);
+    const queued = await fetch(`${server.url}/v1/deletions`, {
+      method: "POST",
+      headers: headersFor(token),
+      body: JSON.stringify({ targetType: "document", resourceId: "r-server000000000000000", documentId: "doc1", source: "gm-2" })
+    });
+    assert.equal(queued.status, 202);
+    const listed = await fetch(`${server.url}/v1/deletions`, { headers: { authorization: `Bearer ${token}` } });
+    const deletions = await listed.json();
+    assert.equal(deletions.deletions[0].source, "gm-1");
+    const review = await fetch(`${server.url}/v1/deletions/${deletions.deletions[0].id}/review`, {
+      method: "POST",
+      headers: headersFor(otherToken),
+      body: JSON.stringify({ decision: "reject", clientId: "gm-1" })
+    });
+    assert.equal(review.status, 409);
+  } finally {
+    server.store.close();
+    await server.close();
+  }
+});

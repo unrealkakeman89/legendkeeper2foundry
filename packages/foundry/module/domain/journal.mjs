@@ -1,5 +1,6 @@
 import { sortByRank } from "./rank.mjs";
 import { assertNoRestrictedContent, projectDocument, publicProperties, redactBlocks } from "./redact.mjs";
+import { safeImageUrl } from "./urls.mjs";
 
 export const MODULE_ID = "legendkeeper";
 export const PAGE_TYPE = "legendkeeper.page";
@@ -13,23 +14,29 @@ export const PAGE_SYSTEM_FIELDS = [
   "isFullWidth",
   "placeholder",
   "blocks",
+  "banner",
+  "properties",
+  "draft",
   "syncState",
   "syncError"
 ];
 
-function pageData(document, blocks) {
+export const PAGE_SORT_STEP = 100000;
+
+function pageData(document, blocks, sort, presentation) {
   const system = projectDocument(document, blocks);
   if (!system) return null;
   return {
     name: document.name || "Page",
     type: PAGE_TYPE,
-    sort: sortIndex(document.rank),
-    system
+    sort,
+    system: {
+      ...system,
+      banner: presentation.banner,
+      properties: presentation.properties,
+      draft: null
+    }
   };
-}
-
-function sortIndex(rank) {
-  return typeof rank === "string" ? rank : "";
 }
 
 /**
@@ -40,6 +47,11 @@ export function buildFoundryJournal(resource, documents, blocksByDocumentId = ne
   const ordered = sortByRank(documents);
   const pages = [];
   const hiddenDocuments = [];
+  const bannerUrl = resource?.banner?.enabled ? safeImageUrl(resource.banner.url) : "";
+  const presentation = {
+    banner: bannerUrl ? { url: bannerUrl, yPosition: resource.banner.yPosition ?? 50 } : null,
+    properties: publicProperties(resource.properties)
+  };
   for (const document of ordered) {
     const stored = { ...document, resourceId: document.resourceId ?? resource.id };
     if (stored.isHidden) {
@@ -47,10 +59,9 @@ export function buildFoundryJournal(resource, documents, blocksByDocumentId = ne
       continue;
     }
     const blocks = blocksByDocumentId.get(stored.id) ?? { blocks: stored.blocks ?? [], version: stored.version ?? "" };
-    const page = pageData(stored, blocks);
+    const page = pageData(stored, blocks, (pages.length + 1) * PAGE_SORT_STEP, presentation);
     if (page) pages.push(page);
   }
-  const banner = resource?.banner?.enabled ? { url: resource.banner.url, yPosition: resource.banner.yPosition ?? 50 } : null;
   const persist = {
     name: resource.name,
     ownership: { default: OWNERSHIP_NONE },
@@ -60,14 +71,9 @@ export function buildFoundryJournal(resource, documents, blocksByDocumentId = ne
         resourceId: resource.id
       }
     },
-    pages,
-    systemPresentation: {
-      banner,
-      properties: publicProperties(resource.properties)
-    }
+    pages
   };
   assertNoRestrictedContent(persist.pages, "Imported journal");
-  assertNoRestrictedContent(persist.systemPresentation, "Imported presentation");
   return {
     persist,
     gmOnly: {
@@ -96,7 +102,7 @@ export function assertPersistable(persist) {
     throw error;
   }
   assertNoRestrictedContent(persist.pages, "Journal pages");
-  assertNoRestrictedContent(persist.systemPresentation, "Journal presentation");
+  if (persist.systemPresentation !== undefined) assertNoRestrictedContent(persist.systemPresentation, "Journal presentation");
   const encoded = JSON.stringify(persist);
   if (encoded.includes("\"kind\":\"secret\"") || encoded.includes("\"isHidden\":true")) {
     const error = new Error("Restricted content reached the Foundry payload");

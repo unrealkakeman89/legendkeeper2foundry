@@ -13,6 +13,9 @@ export function defineLegendKeeperPageModel(foundry) {
         isFullWidth: new fields.BooleanField({ initial: false }),
         placeholder: new fields.StringField({ required: false, blank: true, initial: "" }),
         blocks: new fields.ArrayField(new fields.ObjectField()),
+        banner: new fields.ObjectField({ required: false, nullable: true, initial: null }),
+        properties: new fields.ArrayField(new fields.ObjectField()),
+        draft: new fields.ObjectField({ required: false, nullable: true, initial: null }),
         syncState: new fields.StringField({ choices: ["pending", "synced", "failed"], initial: "synced" }),
         syncError: new fields.StringField({ required: false, blank: true, initial: "" })
       };

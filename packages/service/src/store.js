@@ -105,6 +105,13 @@ const MIGRATIONS = [
   {
     version: 2,
     sql: `ALTER TABLE operations ADD COLUMN response_stored INTEGER NOT NULL DEFAULT 0;`
+  },
+  {
+    version: 3,
+    sql: `
+      ALTER TABLE documents ADD COLUMN draft_json TEXT;
+      ALTER TABLE documents ADD COLUMN remote_json TEXT;
+    `
   }
 ];
 
@@ -191,9 +198,10 @@ function createStore(db, path) {
       }));
     },
     putDocument(resourceId, document, baseline) {
+      const baselineJson = JSON.stringify(baseline ?? null);
       db.prepare(`INSERT INTO documents
-        (lk_resource_id, lk_document_id, name, type, rank, is_hidden, is_full_width, version, updated_at, foundry_uuid, baseline_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (lk_resource_id, lk_document_id, name, type, rank, is_hidden, is_full_width, version, updated_at, foundry_uuid, baseline_json, draft_json, remote_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         ON CONFLICT(lk_resource_id, lk_document_id) DO UPDATE SET
           name = excluded.name,
           type = excluded.type,
@@ -203,7 +211,9 @@ function createStore(db, path) {
           version = excluded.version,
           updated_at = excluded.updated_at,
           foundry_uuid = COALESCE(excluded.foundry_uuid, documents.foundry_uuid),
-          baseline_json = excluded.baseline_json`).run(
+          baseline_json = excluded.baseline_json,
+          draft_json = NULL,
+          remote_json = excluded.remote_json`).run(
         resourceId,
         document.id,
         document.name ?? "",
@@ -214,7 +224,32 @@ function createStore(db, path) {
         baseline?.version ?? document.version ?? "",
         document.updatedAt ?? null,
         document.foundryUuid ?? null,
-        JSON.stringify(baseline ?? null)
+        baselineJson,
+        baselineJson
+      );
+    },
+    setDraft(resourceId, documentId, draft) {
+      db.prepare(`UPDATE documents SET draft_json = ? WHERE lk_resource_id = ? AND lk_document_id = ?`).run(
+        JSON.stringify(draft),
+        resourceId,
+        documentId
+      );
+    },
+    setRemote(resourceId, documentId, remote) {
+      db.prepare(`UPDATE documents SET remote_json = ? WHERE lk_resource_id = ? AND lk_document_id = ?`).run(
+        JSON.stringify(remote),
+        resourceId,
+        documentId
+      );
+    },
+    setResourceFoundryUuid(resourceId, foundryUuid) {
+      db.prepare("UPDATE resources SET foundry_uuid = ? WHERE lk_resource_id = ?").run(foundryUuid, resourceId);
+    },
+    setDocumentFoundryUuid(resourceId, documentId, foundryUuid) {
+      db.prepare(`UPDATE documents SET foundry_uuid = ? WHERE lk_resource_id = ? AND lk_document_id = ?`).run(
+        foundryUuid,
+        resourceId,
+        documentId
       );
     },
     getDocument(resourceId, documentId) {
@@ -231,7 +266,9 @@ function createStore(db, path) {
         version: row.version,
         updatedAt: row.updated_at,
         foundryUuid: row.foundry_uuid,
-        baseline: row.baseline_json ? JSON.parse(row.baseline_json) : null
+        baseline: row.baseline_json ? JSON.parse(row.baseline_json) : null,
+        draft: row.draft_json ? JSON.parse(row.draft_json) : null,
+        remote: row.remote_json ? JSON.parse(row.remote_json) : null
       };
     },
     listDocuments(resourceId) {
@@ -306,6 +343,10 @@ function createStore(db, path) {
     },
     getOperation(id) {
       const row = db.prepare("SELECT * FROM operations WHERE id = ?").get(id);
+      return row ? hydrateOperation(row) : null;
+    },
+    findOperationByKey(opKey) {
+      const row = db.prepare("SELECT * FROM operations WHERE op_key = ?").get(opKey);
       return row ? hydrateOperation(row) : null;
     },
     addConflict(conflict) {

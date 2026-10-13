@@ -7,8 +7,22 @@
   {{/if}}
   <div class="lk-body">{{{rendered}}}</div>
   {{#if editable}}
-    <label>Paragraph
-      <textarea name="paragraphText" data-block-id="{{editBlockId}}">{{paragraphText}}</textarea>
-    </label>
+    <fieldset class="lk-runs" data-block-id="{{editBlockId}}" data-base-version="{{baseVersion}}" data-resource-id="{{lkResourceId}}" data-document-id="{{lkDocumentId}}">
+      <input type="hidden" name="sourceRuns" value="{{sourceRuns}}">
+      <legend>Paragraph runs</legend>
+      {{#each runs}}
+        <label class="lk-run" data-kind="{{kind}}" data-run-index="{{index}}">
+          {{#if locked}}
+            <span class="lk-run-break">Line break</span>
+          {{else}}
+            <input type="text" name="run-{{index}}" data-run-index="{{index}}" value="{{text}}">
+          {{/if}}
+          {{#if marks}}<span class="lk-run-meta">{{marks}}</span>{{/if}}
+          {{#if link}}<span class="lk-run-meta">{{link}}</span>{{/if}}
+          {{#if mentionId}}<span class="lk-run-meta">{{mentionId}}</span>{{/if}}
+        </label>
+      {{/each}}
+      <button type="button" data-action="saveParagraph">Save paragraph</button>
+    </fieldset>
   {{/if}}
 </section>

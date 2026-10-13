@@ -76,6 +76,31 @@
   background: #6d5430;
 }
 
+.legendkeeper .lk-runs {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.legendkeeper .lk-run {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.legendkeeper .lk-run-meta,
+.legendkeeper .lk-run-break {
+  color: #6d5430;
+  font-size: 0.85rem;
+}
+
+.legendkeeper .lk-conflict,
+.legendkeeper .lk-deletion {
+  border: 1px solid var(--lk-rule);
+  padding: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
 .legendkeeper .lk-sync[data-state="pending"] { color: #8a5a12; }
 .legendkeeper .lk-sync[data-state="synced"] { color: #2f6b3a; }
 .legendkeeper .lk-sync[data-state="failed"] { color: #8d2f2f; }
