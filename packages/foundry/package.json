@@ -1,0 +1,5 @@
+{
+  "name": "@legendkeeper/foundry-module",
+  "private": true,
+  "type": "module"
+}

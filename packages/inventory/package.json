@@ -1,0 +1,8 @@
+{
+  "name": "@legendkeeper/inventory",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@legendkeeper/sdk": "4.1.0"
+  }
+}

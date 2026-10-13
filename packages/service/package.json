@@ -1,0 +1,11 @@
+{
+  "name": "@legendkeeper/sync-service",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.14.0"
+  },
+  "dependencies": {
+    "@legendkeeper/sdk": "4.1.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "legendkeeper2foundry",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.14.0"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 packages/inventory/test/*.test.js packages/service/test/*.test.js packages/foundry/test/*.test.js",
+    "inventory": "node packages/inventory/src/cli.js",
+    "service": "node packages/service/src/main.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
+}
